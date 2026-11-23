@@ -1,6 +1,9 @@
 
 from typing import Any, Self, Callable
 import numpy as np
+from copy import copy
+
+from torch.utils import _get_clean_triton
 
 # Regression test data set
 X = np.array([
@@ -100,8 +103,6 @@ class Tree:
         self.value = []
         self.depth = 0
         self.n_nodes = 0
-        self.total_error = 0 # R(T)
-        self.cost_complexity_measure = 0
 
     def add_node(self, region: Region, parent_node: Node | None, side: bool | None):
         """
@@ -109,8 +110,13 @@ class Tree:
         :param region: The X, y region of the Node
         :param parent_node: The parent Node
         :param side: Is this the left (True) or Right (False) side of the parent Node
+        :parma ids_to_force_leaf: If the id of this Node is in the ids_to_force_leaf array then force it to be a leaf.
         :return:
         """
+
+        if ids_to_force_leaf is None:
+            ids_to_force_leaf = []
+
         self.n_node_samples.append(len(region.X))
         node_id = self.nodes[-1].id + 1 if len(self.nodes) > 0 else 0
         if parent_node is not None:
@@ -121,7 +127,7 @@ class Tree:
                 parent_node.immediate_children_nodes[-1] = self.nodes[-1]
         else:
             depth = 0
-        forced_leaf = True if self.max_depth == depth else False
+        forced_leaf = True if (self.max_depth == depth) else False
         self.nodes.append(Node(node_id, region=region, parent_node=parent_node, partition_fn=self.partition_fn,
                                side=side, forced_leaf=forced_leaf))
         self.feature.append(self.nodes[-1].feature)
@@ -144,15 +150,82 @@ class Tree:
                 self.children_left[i] = 0
                 self.children_right[i] = 0
 
+    def cost_complexity_pruning(self):
+        while True:
+            in_nodes = [node for node in self.nodes if not node.leaf]
+            alpha_effs = []
+            for in_node in in_nodes:
+                leaves = [n for n in in_node.all_children_nodes if n.leaf]
+                error_of_leaves = np.sum([l.error for l in leaves])
+                error_in_node = in_node.error
+                alpha_effs.append((error_in_node - error_of_leaves)/(self.n_node_samples[0] * (len(leaves) - 1)))
+            alpha_eff = np.min(alpha_effs)
+            if self.ccp_alpha * (1-1e-6) < alpha_eff < self.ccp_alpha * (1+1e-6) or self.ccp_alpha < alpha_eff:
+                break
 
-    def _calculate_ccp_measure(self):
-        num_of_leaves = 0
-        for node in self.nodes:
-            if node.leaf:
-                self.total_error = self.total_error + node.impurity * len(node.region.y) / self.n_node_samples[0]
-                num_of_leaves = num_of_leaves + 1
+            alpha_eff_index = np.argmin(alpha_effs)
+            node_id = in_nodes[alpha_eff_index].id
+            print(f'Collapsing Node id {node_id} with alpha_eff {alpha_eff}')
+            self._collapse_node(node_id)
 
-        self.cost_complexity_measure = self.total_error + self.ccp_alpha * num_of_leaves
+
+    def _get_index_from_id(self, id):
+        index = None
+        for i, n in enumerate(self.nodes):
+            if n.id == id:
+                index = i
+
+        return index
+
+    def _collapse_node(self, id):
+        index = self._get_index_from_id(id)
+        node = self.nodes[index]
+        node.leaf = True
+        children_to_remove = node.all_children_nodes
+        for child in children_to_remove:
+            self._remove_node(child.id)
+
+
+    def _remove_node(self, id):
+        index = self._get_index_from_id(id)
+        children_nodes = self.nodes[index].all_children_nodes
+        if len(children_nodes) > 0:
+            for child in children_nodes:
+                ch_ind = self._get_index_from_id(child.id)
+                self.nodes.pop(ch_ind)
+                self.feature.pop(ch_ind)
+                self.n_node_samples.pop(ch_ind)
+                self.impurity.pop(ch_ind)
+                self.threshold.pop(ch_ind)
+                self.children_left = np.delete(self.children_left, ch_ind)
+                self.children_right = np.delete(self.children_right, ch_ind)
+        index = self._get_index_from_id(id)
+        self.nodes.pop(index)
+        self.feature.pop(index)
+        self.n_node_samples.pop(index)
+        self.impurity.pop(index)
+        self.threshold.pop(index)
+        self.children_left = np.delete(self.children_left, index)
+        self.children_right = np.delete(self.children_right, index)
+
+        self.n_nodes = len(self.nodes)
+
+        max_depth = 0
+        for n in self.nodes:
+            if n.at_depth > max_depth:
+                max_depth = n.at_depth
+
+        self.depth = max_depth
+
+
+    def _re_id_tree(self):
+        id = 0
+        for d in range(self.depth + 1):
+            nodes_at_depth = [n for n in self.nodes if n.at_depth == d]
+            for n in nodes_at_depth:
+                n.id = id
+                id = id + 1
+
 
     def grow(self, X, y):
         """
@@ -206,8 +279,7 @@ class Tree:
 
         self.depth = max_depth
         self._calculate_num_of_l_r_children_per_node()
-        self._calculate_ccp_measure()
-
+        self._re_id_tree()
 
 class DecisionTreeRegresor:
 
@@ -220,7 +292,7 @@ class DecisionTreeRegresor:
             print('Unrecognised criterion. Not functional regressor')
             return
         self.max_depth = max_depth
-        self.tree = Tree(partition_fn=self._partition, max_depth=self.max_depth)
+        self.tree = Tree(partition_fn=self._partition, max_depth=self.max_depth, ccp_alpha=ccp_alpha)
 
     def apply(self, X):
         pass
@@ -323,9 +395,11 @@ class DecisionTreeRegresor:
 
         return R1, R2, feature, threshold, error
 
-reg = DecisionTreeRegresor('squared_error', max_depth = 3)
+reg = DecisionTreeRegresor('squared_error', max_depth = None,ccp_alpha=0.07)
 reg.fit(X, y)
 print(reg.predict([[5,2], [7.2, 3]]))
+self = copy(reg.tree)
+self.cost_complexity_pruning()
 
 # Classification test dataset
 #X=np.array([[7,6],[3,4],[5,4],[1,1],[8,6],[8,2],[3,3],[5,5],[5,3],[7,4],[1,4],[5,1]],dtype=float)
