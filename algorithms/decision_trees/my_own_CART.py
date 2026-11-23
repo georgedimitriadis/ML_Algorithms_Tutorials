@@ -144,6 +144,7 @@ class Tree:
                 self.children_left[i] = 0
                 self.children_right[i] = 0
 
+
     def _calculate_ccp_measure(self):
         num_of_leaves = 0
         for node in self.nodes:
