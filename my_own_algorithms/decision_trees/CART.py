@@ -409,6 +409,7 @@ class DecisionTreeClassifier:
             print('Unrecognised criterion. Not functional classifier')
             return
         self.max_depth = max_depth
+        self.ccp_alpha = ccp_alpha
         self.tree = Tree(partition_fn=self._partition, max_depth=self.max_depth, ccp_alpha=ccp_alpha)
 
     def fit(self, X, y):
@@ -430,16 +431,21 @@ class DecisionTreeClassifier:
         y = np.zeros((len(X)))
         for i, x in enumerate(X):
             node = self.tree.nodes[0]
-            while True:
-                if node.leaf:
-                    y[i] = node.region.y[0]
-                    break
+            while not node.leaf:
+                if x[node.feature] <= node.threshold:
+                    node = [n for n in self.tree.nodes if n.parent_node == node and n.side][0]
                 else:
-                    f = node.feature
-                    if x[f] < node.threshold:
-                        node = node.immediate_children_nodes[0]
-                    else:
-                        node = node.immediate_children_nodes[1]
+                    node = [n for n in self.tree.nodes if n.parent_node == node and not n.side][0]
+            unique_values = np.unique(node.region.y)
+            if len(unique_values) == 1:
+                y[i] = int(node.region.y[0])
+            else:
+                probs = []
+                for v in unique_values:
+                    probs.append(np.sum(node.region.y == v) / len(node.region.y))
+                sorted_probs, sorted_values = map(list, zip(*sorted(zip(probs, node.region.y))))
+                y[i] = sorted_values[0]
+
         return y
 
     def _gini(self, class_proba: list) -> float:
@@ -508,7 +514,7 @@ class DecisionTreeClassifier:
         return R1, R2, feature, threshold, error
 
 # Regression
-reg_test_set = pd.read_csv(r'E:\Code\Mine\Learning_ML_RL\ML_Algorithms_Tutorials\data\decission_tree_regression_test.csv')
+reg_test_set = pd.read_csv('data/decission_tree_regression_test.csv')
 X_test = reg_test_set[['x1', 'x2']].to_numpy()
 y_test = reg_test_set['y_expected'].to_numpy()
 y_test_depth4 = reg_test_set['y_maxdepth4'].to_numpy()
@@ -542,6 +548,27 @@ X_train=np.array([[4,6,1],[5,4,0],[8,4,0],[7,1,1],[6,4,0],[5,2,1],[8,2,0],[5,6,1
 y_train=np.array([1,0,0,2,0,2,1,2,0,1,1,2,1]); classes=["A","B","C"]; names=["x1","x2","x3"]
 
 cls_test_set = pd.read_csv('data/decission_tree_classification_test.csv')
+X_test = cls_test_set[['x1', 'x2', 'x3']].to_numpy()
+y_test = cls_test_set['class_expected'].to_numpy()
+y_test_depth4 = cls_test_set['class_maxdepth4'].to_numpy()
+y_test_alpha = cls_test_set['class_ccp_alpha_0.08'].to_numpy()
+
+letters = ['A', 'B', 'C']
+
 cls = DecisionTreeClassifier(criterion='gini')
 cls.fit(X_train, y_train)
+y_hat_nums = cls.predict(X_test)
+y_hat = [letters[int(i)] for i in y_hat_nums]
+print(np.all(y_hat == y_test))
 
+cls = DecisionTreeClassifier(criterion='gini', max_depth = 3)
+cls.fit(X_train, y_train)
+y_hat_nums = cls.predict(X_test)
+y_hat = [letters[int(i)] for i in y_hat_nums]
+print(np.all(y_hat == y_test_depth4))
+
+cls = DecisionTreeClassifier(criterion='gini', ccp_alpha=0.08)
+cls.fit(X_train, y_train)
+y_hat_nums = cls.predict(X_test)
+y_hat = [letters[int(i)] for i in y_hat_nums]
+print(np.all(y_hat == y_test_alpha))
