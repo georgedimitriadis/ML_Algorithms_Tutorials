@@ -103,18 +103,13 @@ class Tree:
         :param side: Is this the left (True) or Right (False) side of the parent Node
         :return:
         """
-
-        self.n_node_samples.append(len(region.X))
-        node_id = self.nodes[-1].id + 1 if len(self.nodes) > 0 else 0
         if parent_node is not None:
             depth = parent_node.at_depth + 1
-            if side:
-                parent_node.immediate_children_nodes[0] = self.nodes[-1]
-            else:
-                parent_node.immediate_children_nodes[-1] = self.nodes[-1]
         else:
             depth = 0
 
+        self.n_node_samples.append(len(region.X))
+        node_id = self.nodes[-1].id + 1 if len(self.nodes) > 0 else 0
         # Forced to be leaf if we have reached maximum allowed depth or the node cannot be split any further because
         # it has only one unique X value for multiple y values. More 'ending' criteria can be added here.
         forced_leaf = True if (self.max_depth == depth or np.unique(region.X, axis=0).shape[0] == 1) else False
@@ -125,6 +120,12 @@ class Tree:
         self.threshold.append(self.nodes[-1].threshold)
         self.impurity.append(self.nodes[-1].impurity)
         self.n_nodes = self.n_nodes + 1
+
+        if parent_node is not None:
+            if side:
+                parent_node.immediate_children_nodes[0] = self.nodes[-1]
+            else:
+                parent_node.immediate_children_nodes[1] = self.nodes[-1]
 
     def _calculate_num_of_l_r_children_per_node(self):
         self.children_left = np.zeros((self.n_nodes))
@@ -149,7 +150,7 @@ class Tree:
                 leaves = [n for n in in_node.all_children_nodes if n.leaf]
                 error_of_leaves = np.sum([l.error for l in leaves])
                 error_in_node = in_node.error
-                alpha_effs.append((error_in_node - error_of_leaves)/(self.n_node_samples[0] * (len(leaves) - 1)))
+                alpha_effs.append((error_in_node - error_of_leaves)/ (len(leaves) - 1))
             alpha_eff = np.min(alpha_effs)
             if self.ccp_alpha * (1-1e-6) < alpha_eff < self.ccp_alpha * (1+1e-6) or self.ccp_alpha < alpha_eff:
                 break
@@ -175,28 +176,25 @@ class Tree:
         return index
 
     def _collapse_node(self, id):
-        index = self._get_index_from_id(id)
-        node = self.nodes[index]
+        node = self._get_nodes_from_ids([id])[0]
         node.leaf = True
-        children_to_remove = copy(node.all_children_nodes)
-        for child in children_to_remove:
-            self._remove_node(child)
+        children_to_remove = copy(node.immediate_children_nodes)
+        if None not in children_to_remove:
+            for child in children_to_remove:
+                self._remove_node(child)
 
 
     def _remove_node(self, node: Node):
-        index = self._get_index_from_id(node.id)
-        children_nodes = self.nodes[index].all_children_nodes
-        nodes_removed = [node] + children_nodes
-        if len(children_nodes) > 0:
+        children_nodes = copy(node.immediate_children_nodes)
+        if None not in children_nodes:
             for child in children_nodes:
-                ch_ind = self._get_index_from_id(child.id)
-                self.nodes.pop(ch_ind)
-                self.feature.pop(ch_ind)
-                self.n_node_samples.pop(ch_ind)
-                self.impurity.pop(ch_ind)
-                self.threshold.pop(ch_ind)
-                self.children_left = np.delete(self.children_left, ch_ind)
-                self.children_right = np.delete(self.children_right, ch_ind)
+                self._remove_node(child)
+
+        for n in self.nodes:
+            if node in n.all_children_nodes:
+                n.all_children_nodes.remove(node)
+            if node in n.immediate_children_nodes:
+                n.immediate_children_nodes.remove(node)
 
         index = self._get_index_from_id(node.id)
         self.nodes.pop(index)
@@ -216,14 +214,6 @@ class Tree:
 
         self.depth = max_depth
 
-        for node in self.nodes:
-            for rn in nodes_removed:
-                if rn in node.all_children_nodes:
-                    node.all_children_nodes.remove(rn)
-                if rn in node.immediate_children_nodes:
-                    node.immediate_children_nodes.remove(rn)
-
-
     def _re_id_tree(self):
         id = 0
         for d in range(self.depth + 1):
@@ -231,7 +221,6 @@ class Tree:
             for n in nodes_at_depth:
                 n.id = id
                 id = id + 1
-
 
     def grow(self, X, y):
         """
@@ -394,7 +383,7 @@ class DecisionTreeRegressor:
             error  = np.sum(np.square(y - np.mean(y)))
         elif self.criterion == self._absolute_error:
             error = np.sum(np.abs(y - np.median(y)))
-
+        error = error / self.tree.n_node_samples[0]
         return R1, R2, feature, threshold, error
 
 
@@ -440,11 +429,19 @@ class DecisionTreeClassifier:
             if len(unique_values) == 1:
                 y[i] = int(node.region.y[0])
             else:
+                # If the leaf is not pure then get the class with the highest probability. If there is a tie break it with the earliest class
                 probs = []
                 for v in unique_values:
                     probs.append(np.sum(node.region.y == v) / len(node.region.y))
                 sorted_probs, sorted_values = map(list, zip(*sorted(zip(probs, node.region.y))))
-                y[i] = sorted_values[0]
+                equal_probs_values = []
+                for k, p in enumerate(sorted_probs[:-1]):
+                    if p == sorted_probs[-1]:
+                        equal_probs_values.append(k)
+                if len(equal_probs_values) >0:
+                    y[i] = sorted_values[equal_probs_values[0]]
+                else:
+                    y[i] = sorted_values[-1]
 
         return y
 
@@ -509,9 +506,11 @@ class DecisionTreeClassifier:
 
         feature = int(j_min)
         threshold = float(s_min)
-        error = error_j_min
+        probs = 1/len(y) * np.array([np.sum(y==i) for i in np.unique(y)])
+        error = len(y) / self.tree.n_node_samples[0] * self.criterion(probs)
 
         return R1, R2, feature, threshold, error
+
 
 # Regression
 reg_test_set = pd.read_csv('data/decission_tree_regression_test.csv')
@@ -547,13 +546,15 @@ X_train=np.array([[4,6,1],[5,4,0],[8,4,0],[7,1,1],[6,4,0],[5,2,1],[8,2,0],[5,6,1
             [1,3,0],[5,3,0],[7,2,1],[7,5,0],[7,5,0]],dtype=float)
 y_train=np.array([1,0,0,2,0,2,1,2,0,1,1,2,1]); classes=["A","B","C"]; names=["x1","x2","x3"]
 
-cls_test_set = pd.read_csv('data/decission_tree_classification_test.csv')
+
+cls_test_set = pd.read_csv(r'E:\Code\Mine\Learning_ML_RL\ML_Algorithms_Tutorials\data\decission_tree_classification_test.csv')
 X_test = cls_test_set[['x1', 'x2', 'x3']].to_numpy()
 y_test = cls_test_set['class_expected'].to_numpy()
 y_test_depth4 = cls_test_set['class_maxdepth4'].to_numpy()
 y_test_alpha = cls_test_set['class_ccp_alpha_0.08'].to_numpy()
 
 letters = ['A', 'B', 'C']
+
 
 cls = DecisionTreeClassifier(criterion='gini')
 cls.fit(X_train, y_train)
@@ -566,6 +567,7 @@ cls.fit(X_train, y_train)
 y_hat_nums = cls.predict(X_test)
 y_hat = [letters[int(i)] for i in y_hat_nums]
 print(np.all(y_hat == y_test_depth4))
+
 
 cls = DecisionTreeClassifier(criterion='gini', ccp_alpha=0.08)
 cls.fit(X_train, y_train)
