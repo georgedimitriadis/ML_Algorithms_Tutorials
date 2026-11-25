@@ -45,7 +45,6 @@ class Node:
             self.l_r_completed: list[bool] = [False, False]
             self.region_left, self.region_right, self.feature, self.threshold, self.error = self._partition(self.region)
 
-        self.impurity = self.error / len(self.region.y)
 
     @property
     def n_children(self):
@@ -89,7 +88,6 @@ class Tree:
         self.feature = []
         self.threshold = []
         self.n_node_samples = []
-        self.impurity = []
         self.weighted_n_node_samples = []
         self.value = []
         self.depth = 0
@@ -118,7 +116,6 @@ class Tree:
                                side=side, forced_leaf=forced_leaf))
         self.feature.append(self.nodes[-1].feature)
         self.threshold.append(self.nodes[-1].threshold)
-        self.impurity.append(self.nodes[-1].impurity)
         self.n_nodes = self.n_nodes + 1
 
         if parent_node is not None:
@@ -145,6 +142,8 @@ class Tree:
     def cost_complexity_pruning(self):
         while True:
             in_nodes = [node for node in self.nodes if not node.leaf]
+            if not in_nodes:
+                break
             alpha_effs = []
             for in_node in in_nodes:
                 leaves = [n for n in in_node.all_children_nodes if n.leaf]
@@ -152,7 +151,7 @@ class Tree:
                 error_in_node = in_node.error
                 alpha_effs.append((error_in_node - error_of_leaves)/ (len(leaves) - 1))
             alpha_eff = np.min(alpha_effs)
-            if self.ccp_alpha * (1-1e-6) < alpha_eff < self.ccp_alpha * (1+1e-6) or self.ccp_alpha < alpha_eff:
+            if self.ccp_alpha * (1 + 1e-6) < alpha_eff:
                 break
 
             alpha_eff_index = np.argmin(alpha_effs)
@@ -200,7 +199,6 @@ class Tree:
         self.nodes.pop(index)
         self.feature.pop(index)
         self.n_node_samples.pop(index)
-        self.impurity.pop(index)
         self.threshold.pop(index)
         self.children_left = np.delete(self.children_left, index)
         self.children_right = np.delete(self.children_right, index)
@@ -231,7 +229,7 @@ class Tree:
         """
         self._initialise_tree()
         current_depth = 0
-        max_depth = 1
+        max_depth = 0
 
         self.add_node(region=Region(X, y), parent_node=None, side=None)
         root_node = self.nodes[0]
@@ -323,11 +321,11 @@ class DecisionTreeRegressor:
 
     def _squared_error(self, y: np.ndarray | list, y_hat_R1: np.floating[Any], y_hat_R2: np.floating[Any],
                        ind_R1: np.ndarray | list, ind_R2: np.ndarray | list) -> float:
-        return np.sum([np.square(y[i] - y_hat_R1) for i in ind_R1]) + np.sum([np.square(y[i] - y_hat_R2) for i in ind_R2]) / len(y)
+        return (np.sum([np.square(y[i] - y_hat_R1) for i in ind_R1]) + np.sum([np.square(y[i] - y_hat_R2) for i in ind_R2])) / len(y)
 
     def _absolute_error(self, y: np.ndarray | list, y_hat_R1: np.floating[Any], y_hat_R2: np.floating[Any],
                         ind_R1: np.ndarray | list, ind_R2: np.ndarray | list) -> float:
-        return np.sum([np.abs(y[i] - y_hat_R1) for i in ind_R1]) + np.sum(np.abs([np.square(y[i] - y_hat_R2) for i in ind_R2])) / len(y)
+        return (np.sum([np.abs(y[i] - y_hat_R1) for i in ind_R1]) + np.sum(np.abs([y[i] - y_hat_R2 for i in ind_R2]))) / len(y)
 
     def _partition(self, region: Region) -> tuple[Region, Region, int, float, float]:
 
@@ -349,7 +347,8 @@ class DecisionTreeRegressor:
         for j in range(n_features):
             x_j = np.unique(np.sort(X[:, j]))
             if len(x_j) == 1:
-                ss = x_j
+                continue
+                #ss = x_j
             else:
                 ss = [(x_j[k] + x_j[k + 1]) / 2 for k in range(len(x_j) - 1)]
             ss_min = ss[0]
@@ -367,7 +366,7 @@ class DecisionTreeRegressor:
                     error_min = error
                     ss_min = s
 
-            if error_min < error_j_min:
+            if error_min <= error_j_min:
                 j_min = j
                 s_min = ss_min
                 error_j_min = error_min
@@ -433,7 +432,7 @@ class DecisionTreeClassifier:
                 probs = []
                 for v in unique_values:
                     probs.append(np.sum(node.region.y == v) / len(node.region.y))
-                sorted_probs, sorted_values = map(list, zip(*sorted(zip(probs, node.region.y))))
+                sorted_probs, sorted_values = map(list, zip(*sorted(zip(probs, unique_values))))
                 equal_probs_values = []
                 for k, p in enumerate(sorted_probs[:-1]):
                     if p == sorted_probs[-1]:
@@ -472,7 +471,8 @@ class DecisionTreeClassifier:
         for j in range(n_features):
             x_j = np.unique(np.sort(X[:, j]))
             if len(x_j) == 1:
-                ss = x_j
+                continue
+                #ss = x_j
             else:
                 ss = [(x_j[k] + x_j[k + 1]) / 2 for k in range(len(x_j) - 1)]
             ss_min = ss[0]
@@ -495,7 +495,7 @@ class DecisionTreeClassifier:
                     error_min = error
                     ss_min = s
 
-            if error_min < error_j_min:
+            if error_min <= error_j_min:
                 j_min = j
                 s_min = ss_min
                 error_j_min = error_min
